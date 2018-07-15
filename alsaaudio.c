@@ -45,7 +45,7 @@ typedef struct {
     char *cardname;
 
     snd_pcm_t *handle;
-
+    snd_pcm_hw_params_t *hwparams;
     // Configurable parameters
     int channels;
     int rate;
@@ -360,13 +360,17 @@ alsapcm_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
     int pcmmode = 0;
     char *device = "default";
     char *card = NULL;
+    unsigned int rate = 48000;
+    unsigned int latency = 500000;
+    unsigned int channels = 2;
+    snd_pcm_format_t format = SND_PCM_FORMAT_S16_LE;
     int cardidx = -1;
     char hw_device[128];
-    char *kw[] = { "type", "mode", "device", "cardindex", "card", NULL };
+    char *kw[] = { "type", "mode", "device", "cardindex", "card", "rate", "latency", "fmt", "channels", NULL };
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "|Oisiz", kw,
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "|Oisiziiii", kw,
                                      &pcmtypeobj, &pcmmode, &device,
-                                     &cardidx, &card))
+                                     &cardidx, &card, &rate, &latency, &format, &channels))
         return NULL;
 
     if (cardidx >= 0) {
@@ -410,18 +414,28 @@ alsapcm_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
     self->handle = 0;
     self->pcmtype = pcmtype;
     self->pcmmode = pcmmode;
-    self->channels = 2;
-    self->rate = 44100;
-    self->format = SND_PCM_FORMAT_S16_LE;
-    self->periodsize = 32;
+    self->channels = channels;
+    self->rate = rate;
+    self->format = format;
+
 
     res = snd_pcm_open(&(self->handle), device, self->pcmtype,
                        self->pcmmode);
 
-    if (res >= 0) {
-        res = alsapcm_setup(self);
+    if (res >= 0){
+     snd_pcm_hw_params_malloc(&(self->hwparams));
     }
-    
+    res = snd_pcm_set_params(self->handle, format, 
+      SND_PCM_ACCESS_RW_INTERLEAVED, channels, rate, 1, latency);
+    if (res) {
+            PyErr_Format(ALSAAudioError, "%s [%s]", snd_strerror(res), device);
+    }
+
+    //Populate framesize and periodsize
+    snd_pcm_hw_params_current(self->handle, self->hwparams);
+    self->framesize = channels * snd_pcm_hw_params_get_sbits(self->hwparams)/8;
+    snd_pcm_hw_params_get_period_size(self->hwparams,&self->periodsize,0);
+
     if (res >= 0) {
         self->cardname = strdup(device);
     }
@@ -729,6 +743,25 @@ PyDoc_STRVAR(setformat_doc,
 "setformat(rate)\n");
 
 static PyObject *
+alsapcm_getperiodsize(alsapcm_t *self, PyObject *args)
+{
+    int periodsize;
+    int res;
+    if (!self->handle)
+    {
+        PyErr_SetString(ALSAAudioError, "PCM device is closed");
+        return NULL;
+    }
+
+    return PyLong_FromLong(self->periodsize);
+}
+
+PyDoc_STRVAR(getperiodsize_doc,
+"getperiodsize() -> int\n\
+\n\
+Gets the actual period size in frames."); 
+
+static PyObject *
 alsapcm_setperiodsize(alsapcm_t *self, PyObject *args)
 {
     int periodsize;
@@ -1017,8 +1050,8 @@ static PyMethodDef alsapcm_methods[] = {
      setchannels_doc },
     {"setrate", (PyCFunction)alsapcm_setrate, METH_VARARGS, setrate_doc},
     {"setformat", (PyCFunction)alsapcm_setformat, METH_VARARGS, setformat_doc},
-    {"setperiodsize", (PyCFunction)alsapcm_setperiodsize, METH_VARARGS,
-     setperiodsize_doc},
+    {"setperiodsize", (PyCFunction)alsapcm_setperiodsize, METH_VARARGS, setperiodsize_doc},
+    {"getperiodsize", (PyCFunction)alsapcm_getperiodsize, METH_VARARGS, getperiodsize_doc},
     {"dumpinfo", (PyCFunction)alsapcm_dumpinfo, METH_VARARGS},
     {"read", (PyCFunction)alsapcm_read, METH_VARARGS, read_doc},
     {"write", (PyCFunction)alsapcm_write, METH_VARARGS, write_doc},
